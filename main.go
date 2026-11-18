@@ -5,10 +5,12 @@ package main
 
 import (
 	_ "embed"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,12 +29,35 @@ var injectJS string
 //go:embed setup.html
 var setupHTML string
 
+//go:embed prueba/aulapp-prueba.html
+var pruebaHTML []byte
+
+// Convierte "C:\carpeta\pagina.html" (con o sin comillas) en una dirección file:///
+func normalizarURL(u string) string {
+	u = strings.Trim(strings.TrimSpace(u), "\"'")
+	if u == "" {
+		return ""
+	}
+	low := strings.ToLower(u)
+	if strings.HasPrefix(low, "http://") || strings.HasPrefix(low, "https://") || strings.HasPrefix(low, "file:") {
+		return u
+	}
+	if len(u) > 2 && u[1] == ':' && (u[2] == '\\' || u[2] == '/') {
+		return (&url.URL{Scheme: "file", Path: "/" + strings.ReplaceAll(u, "\\", "/")}).String()
+	}
+	return "https://" + u
+}
+
 const recargaSegundos = 30
 
 // ---------------- Configuración ----------------
 
 type Config struct {
-	URL string `json:"url"`
+	URL        string `json:"url"`
+	Usuario    string `json:"usuario,omitempty"`
+	Clave      string `json:"clave,omitempty"` // cifrada con DPAPI de Windows (solo este usuario de Windows puede leerla)
+	Host       string `json:"host,omitempty"`
+	AutoEntrar bool   `json:"autoEntrar"`
 }
 
 func carpetaApp() string {
@@ -46,7 +71,7 @@ func carpetaApp() string {
 }
 
 func cargarConfig() Config {
-	var c Config
+	c := Config{AutoEntrar: true}
 	b, err := os.ReadFile(filepath.Join(carpetaApp(), "config.json"))
 	if err == nil {
 		json.Unmarshal(b, &c)
@@ -71,6 +96,7 @@ var (
 	pSetWindowPos  = user32.NewProc("SetWindowPos")
 	pPlaySound     = winmm.NewProc("PlaySoundW")
 	pBeep          = syscall.NewLazyDLL("kernel32.dll").NewProc("Beep")
+	pSetExecState  = syscall.NewLazyDLL("kernel32.dll").NewProc("SetThreadExecutionState")
 )
 
 const (
@@ -82,7 +108,7 @@ const (
 	mbIconInfo  = 0x0040
 	mbTopmost   = 0x40000
 	mbSetFg     = 0x10000
-	swRestore   = 9
+	swMaximize  = 3
 	flashAll    = 0x3
 	flashTimer  = 0x4
 	hwndTopmost = ^uintptr(0)     // -1
@@ -109,13 +135,76 @@ func traerAlFrente(hwnd uintptr) {
 	if hwnd == 0 {
 		return
 	}
-	pShowWindow.Call(hwnd, swRestore)
+	pShowWindow.Call(hwnd, swMaximize) // si estaba minimizada vuelve maximizada
 	pSetWindowPos.Call(hwnd, hwndTopmost, 0, 0, 0, 0, swpFlags)
 	pSetWindowPos.Call(hwnd, hwndNoTop, 0, 0, 0, 0, swpFlags)
 	pSetForeground.Call(hwnd)
 	fi := flashInfo{hwnd: hwnd, dwFlags: flashAll | flashTimer}
 	fi.cbSize = uint32(unsafe.Sizeof(fi))
 	pFlashWindowEx.Call(uintptr(unsafe.Pointer(&fi)))
+}
+
+// ---------------- Contraseña cifrada (DPAPI) ----------------
+
+var (
+	crypt32     = syscall.NewLazyDLL("crypt32.dll")
+	pProtect    = crypt32.NewProc("CryptProtectData")
+	pUnprotect  = crypt32.NewProc("CryptUnprotectData")
+	pLocalFree  = syscall.NewLazyDLL("kernel32.dll").NewProc("LocalFree")
+	entropiaCUA = []byte("CondUAlarma-v2")
+)
+
+type dataBlob struct {
+	cbData uint32
+	pbData *byte
+}
+
+func blob(b []byte) *dataBlob {
+	if len(b) == 0 {
+		return &dataBlob{}
+	}
+	return &dataBlob{cbData: uint32(len(b)), pbData: &b[0]}
+}
+
+func (d *dataBlob) bytes() []byte {
+	if d.pbData == nil || d.cbData == 0 {
+		return nil
+	}
+	out := make([]byte, d.cbData)
+	copy(out, unsafe.Slice(d.pbData, d.cbData))
+	return out
+}
+
+func cifrar(texto string) (string, error) {
+	var out dataBlob
+	r, _, err := pProtect.Call(uintptr(unsafe.Pointer(blob([]byte(texto)))), 0,
+		uintptr(unsafe.Pointer(blob(entropiaCUA))), 0, 0, 0x1, uintptr(unsafe.Pointer(&out)))
+	if r == 0 {
+		return "", err
+	}
+	defer pLocalFree.Call(uintptr(unsafe.Pointer(out.pbData)))
+	return base64.StdEncoding.EncodeToString(out.bytes()), nil
+}
+
+func descifrar(b64 string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(raw) == 0 {
+		return "", fmt.Errorf("vacío")
+	}
+	var out dataBlob
+	r, _, err := pUnprotect.Call(uintptr(unsafe.Pointer(blob(raw))), 0,
+		uintptr(unsafe.Pointer(blob(entropiaCUA))), 0, 0, 0x1, uintptr(unsafe.Pointer(&out)))
+	if r == 0 {
+		return "", err
+	}
+	defer pLocalFree.Call(uintptr(unsafe.Pointer(out.pbData)))
+	return string(out.bytes()), nil
+}
+
+func preguntar(hwnd uintptr, titulo, texto string) bool {
+	r, _, _ := pMessageBox.Call(hwnd, uintptr(unsafe.Pointer(u16(texto))),
+		uintptr(unsafe.Pointer(u16(titulo))), 0x4|0x20|mbTopmost|mbSetFg) // YESNO | ICONQUESTION
+	return r == 6 // IDYES
 }
 
 // ---------------- Sonido ----------------
@@ -201,6 +290,22 @@ type App struct {
 	pausado   bool
 	avisados  map[string]bool
 	alarmando bool
+
+	// Ciclo de la clase según lo que muestra Aulapp:
+	// "Cierre de registro de entrada" visible → se están tomando huellas (alarma + sin recarga)
+	// "Finalización de clase" visible → la clase terminó; se rearma para el próximo registro.
+	cinta       bool // cinta superior abierta (la decide el usuario; la alarma la abre)
+	alarmaTexto string
+	enRegistro  bool
+	finalizada  bool
+	armada      bool
+	ultimoAuto  time.Time
+	preguntando bool
+}
+
+type Fase struct {
+	Registro   bool `json:"registro"`
+	Finalizada bool `json:"finalizada"`
 }
 
 // "16:55", "4:55 PM", "4:55 p. m." → hora de hoy
@@ -249,6 +354,12 @@ func esHoy(fecha string) bool {
 	return true
 }
 
+func (a *App) yaAvisado(k string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.avisados[k]
+}
+
 func (a *App) hwnd() uintptr { return uintptr(a.w.Window()) }
 
 func (a *App) evalJS(js string) { a.w.Dispatch(func() { a.w.Eval(js) }) }
@@ -261,6 +372,8 @@ func (a *App) disparar(clave, titulo, texto string, sirena bool) {
 	}
 	a.avisados[clave] = true
 	a.alarmando = true
+	a.cinta = true
+	a.alarmaTexto = titulo
 	a.mu.Unlock()
 
 	if sirena {
@@ -286,6 +399,33 @@ func (a *App) disparar(clave, titulo, texto string, sirena bool) {
 	}()
 }
 
+// Llamado por la página cada pocos segundos con lo que se ve en pantalla.
+func (a *App) actualizarFase(f Fase) {
+	a.mu.Lock()
+	antes := a.enRegistro
+	a.enRegistro = f.Registro
+	a.finalizada = f.Finalizada && !f.Registro
+	if a.finalizada {
+		a.armada = true // espera al próximo "Cierre de registro de entrada"
+	}
+	disparar := f.Registro && !antes && a.armada
+	if disparar {
+		a.armada = false
+	}
+	c := a.clase
+	a.mu.Unlock()
+
+	if disparar {
+		nombre := ""
+		if c != nil && c.Nombre != "" {
+			nombre = "\n" + c.Nombre
+		}
+		a.disparar(fmt.Sprintf("registro|%d", time.Now().UnixNano()), "¡REGISTRO DE ENTRADA ABIERTO!",
+			"Aulapp muestra \"Cierre de registro de entrada\": ya se están tomando las huellas."+nombre+
+				"\n\nLa página no se recargará mientras dure el registro.", true)
+	}
+}
+
 func (a *App) vigilar() {
 	for range time.Tick(2 * time.Second) {
 		a.mu.Lock()
@@ -304,7 +444,13 @@ func (a *App) vigilar() {
 		}
 		ahora := time.Now()
 		clave := c.Fecha + "|" + c.Min
-		if !ahora.Before(min) && ahora.Before(max) {
+		a.mu.Lock()
+		puede := a.armada && !a.enRegistro
+		a.mu.Unlock()
+		if puede && !ahora.Before(min) && ahora.Before(max) && !a.yaAvisado(clave+"|abre") {
+			a.mu.Lock()
+			a.armada = false
+			a.mu.Unlock()
 			a.disparar(clave+"|abre", "¡VALIDACIÓN ABIERTA!",
 				fmt.Sprintf("Ya se puede registrar la huella.\n%s\nVentana: %s a %s",
 					c.Nombre, c.Min, c.Max), true)
@@ -318,7 +464,7 @@ func (a *App) vigilar() {
 }
 
 func main() {
-	app := &App{cfg: cargarConfig(), avisados: map[string]bool{}}
+	app := &App{cfg: cargarConfig(), avisados: map[string]bool{}, armada: true}
 
 	w := webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug:     false,
@@ -340,6 +486,7 @@ func main() {
 	}
 	defer w.Destroy()
 	app.w = w
+	pShowWindow.Call(app.hwnd(), swMaximize) // siempre abre maximizada
 
 	// --- Funciones que la página puede llamar ---
 	w.Bind("cuaReportar", func(c Clase) {
@@ -354,10 +501,19 @@ func main() {
 		app.mu.Lock()
 		defer app.mu.Unlock()
 		return map[string]interface{}{
-			"pausado":  app.pausado,
-			"clase":    app.clase,
-			"segundos": recargaSegundos,
-			"url":      app.cfg.URL,
+			"pausado":     app.pausado,
+			"clase":       app.clase,
+			"segundos":    recargaSegundos,
+			"url":         app.cfg.URL,
+			"usuario":     app.cfg.Usuario,
+			"guardado":    app.cfg.Clave != "",
+			"autoEntrar":  app.cfg.AutoEntrar,
+			"registro":    app.enRegistro,
+			"finalizada":  app.finalizada,
+			"armada":      app.armada,
+			"cinta":       app.cinta,
+			"alarmando":   app.alarmando,
+			"alarmaTexto": app.alarmaTexto,
 		}
 	})
 	w.Bind("cuaPausar", func(p bool) {
@@ -373,12 +529,9 @@ func main() {
 		}()
 	})
 	w.Bind("cuaGuardarURL", func(u string) {
-		u = strings.TrimSpace(u)
+		u = normalizarURL(u)
 		if u == "" {
 			return
-		}
-		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-			u = "https://" + u
 		}
 		app.mu.Lock()
 		app.cfg.URL = u
@@ -395,6 +548,112 @@ func main() {
 		}
 	})
 
+	w.Bind("cuaCinta", func(v bool) {
+		app.mu.Lock()
+		app.cinta = v
+		app.mu.Unlock()
+	})
+	w.Bind("cuaDetener", func() { detenerSonido() })
+	w.Bind("cuaFase", func(f Fase) { app.actualizarFase(f) })
+
+	// La página avisa que el usuario escribió su usuario/contraseña y pulsó Ingresar.
+	w.Bind("cuaCredenciales", func(host, usuario, clave string) {
+		if strings.TrimSpace(usuario) == "" || clave == "" {
+			return
+		}
+		app.mu.Lock()
+		igual := false
+		if app.cfg.Usuario == usuario && app.cfg.Clave != "" {
+			if c, err := descifrar(app.cfg.Clave); err == nil && c == clave {
+				igual = true
+			}
+		}
+		if igual || app.preguntando {
+			app.mu.Unlock()
+			return
+		}
+		app.preguntando = true
+		app.mu.Unlock()
+		go func() {
+			defer func() { app.mu.Lock(); app.preguntando = false; app.mu.Unlock() }()
+			if !preguntar(app.hwnd(), "CondUAlarma — Guardar acceso",
+				"¿Guardar el usuario \""+usuario+"\" y su contraseña?\n\n"+
+					"CondUAlarma entrará solo cada vez que lo abras (o con un clic en 🔑 Entrar).\n"+
+					"La contraseña queda cifrada y solo se puede leer en esta cuenta de Windows.") {
+				return
+			}
+			cif, err := cifrar(clave)
+			if err != nil {
+				mensaje(app.hwnd(), "CondUAlarma", "No se pudo guardar la contraseña: "+err.Error(), mbOK|mbIconWarn)
+				return
+			}
+			app.mu.Lock()
+			app.cfg.Usuario, app.cfg.Clave, app.cfg.Host = usuario, cif, host
+			app.cfg.AutoEntrar = true
+			guardarConfig(app.cfg)
+			app.mu.Unlock()
+			app.evalJS("window.__cuaToast && window.__cuaToast('🔑 Acceso guardado. La próxima vez entrará solo.')")
+		}()
+	})
+
+	// La página de login pide el acceso guardado. auto=true si va a intentar entrar sola.
+	w.Bind("cuaAcceso", func(auto bool) map[string]interface{} {
+		app.mu.Lock()
+		defer app.mu.Unlock()
+		if app.cfg.Clave == "" {
+			return map[string]interface{}{"ok": false}
+		}
+		clave, err := descifrar(app.cfg.Clave)
+		if err != nil {
+			return map[string]interface{}{"ok": false}
+		}
+		permitir := app.cfg.AutoEntrar
+		bloqueado := false
+		if auto && permitir {
+			// Si vuelve a salir el login menos de 60 s después de entrar solo,
+			// probablemente la contraseña cambió: no insistir.
+			if time.Since(app.ultimoAuto) < 60*time.Second {
+				bloqueado = true
+			} else {
+				app.ultimoAuto = time.Now()
+			}
+		}
+		return map[string]interface{}{
+			"ok": true, "usuario": app.cfg.Usuario, "clave": clave,
+			"auto": permitir && !bloqueado, "bloqueado": bloqueado,
+		}
+	})
+	w.Bind("cuaAutoEntrar", func(v bool) {
+		app.mu.Lock()
+		app.cfg.AutoEntrar = v
+		guardarConfig(app.cfg)
+		app.mu.Unlock()
+	})
+	w.Bind("cuaOlvidar", func() {
+		app.mu.Lock()
+		app.cfg.Usuario, app.cfg.Clave, app.cfg.Host = "", "", ""
+		guardarConfig(app.cfg)
+		app.mu.Unlock()
+	})
+	w.Bind("cuaPaginaPrueba", func() {
+		ruta := filepath.Join(carpetaApp(), "aulapp-prueba.html")
+		if err := os.WriteFile(ruta, pruebaHTML, 0o644); err != nil {
+			mensaje(app.hwnd(), "CondUAlarma", "No se pudo crear la página de prueba: "+err.Error(), mbOK|mbIconWarn)
+			return
+		}
+		u := normalizarURL(ruta)
+		w.Dispatch(func() { w.Navigate(u) })
+	})
+	w.Bind("cuaAnclar", func(u string) {
+		if !strings.HasPrefix(u, "http") && !strings.HasPrefix(u, "file:") {
+			return
+		}
+		app.mu.Lock()
+		app.cfg.URL = u
+		guardarConfig(app.cfg)
+		app.mu.Unlock()
+	})
+
 	w.Init(injectJS)
 
 	if app.cfg.URL == "" {
@@ -402,6 +661,19 @@ func main() {
 	} else {
 		w.Navigate(app.cfg.URL)
 	}
+
+	// Evita que Windows suspenda el PC mientras CondUAlarma está abierto
+	// (la suspensión corta la conexión). La pantalla sí se puede apagar.
+	pSetExecState.Call(0x80000000 | 0x00000001) // ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+	defer pSetExecState.Call(0x80000000)
+
+	// Latido: con la ventana minimizada el navegador frena sus temporizadores;
+	// desde aquí se le recuerda cada 10 s que revise la conexión.
+	go func() {
+		for range time.Tick(10 * time.Second) {
+			app.evalJS("window.__cuaLatido && window.__cuaLatido()")
+		}
+	}()
 
 	go app.vigilar()
 	w.Run()

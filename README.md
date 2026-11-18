@@ -10,17 +10,25 @@ Ve a **[Releases](../../releases/latest)** y descarga **`condualarma.exe`**. No 
 
 ## Qué hace
 
-- 🔄 **Recarga la página cada 30 s** para que Aulapp no cierre la sesión (espera si estás escribiendo y se puede pausar).
+- 🔑 **Guarda tu usuario y contraseña** (cifrados con Windows) y **entra solo** al abrir la app, o con un clic en **Entrar**.
+- 📌 **Anclar**: guarda la página actual para que CondUAlarma abra siempre ahí.
+- 🔄 **Mantiene la sesión viva sin recargar**: cada 30 s pide la página a Aulapp en segundo plano. La página visible solo se actualiza si aparece algo nuevo (registro de entrada, nuevas horas, sesión vencida) y **nunca** mientras se ve *"Cierre de registro de entrada"*, durante la validación o mientras escribes.
+- 💤 Funciona minimizado y evita que el PC se suspenda mientras la app está abierta.
 - 🕓 **Lee la clase**: Fecha, Nombre de la clase, *Hora mínima validación* y *Hora máxima validación*.
-- 🔔 **Alarma a la hora mínima**: sirena en bucle, la ventana salta al frente y parpadea, y aparece un aviso grande. Se detiene al pulsar **Aceptar**.
+- 🔔 **Alarma cuando aparece "Cierre de registro de entrada"** (o a la hora mínima de validación). Tras *"Finalización de clase"* se rearma y espera el próximo registro.
+- 🚨 Al sonar: sirena en bucle, la ventana salta al frente y parpadea, y aparece un aviso grande. Se detiene al pulsar **Aceptar**.
 - ⏳ **Recordatorio 5 minutos antes** de que cierre la validación.
 - 💾 Guarda la URL de tu academia y la sesión, para no volver a iniciar sesión cada vez.
 
-| Pantalla inicial | Panel dentro de Aulapp |
+| Pantalla inicial | Cinta superior dentro de Aulapp |
 |---|---|
 | ![Configuración](docs/setup.png) | ![Panel](docs/panel.png) |
 
+![Cinta cerrada](docs/cerrada.png)
+
 ![Alarma](docs/banner.png)
+
+La cinta está cerrada por defecto (solo una pestaña con el estado). Se abre o se cierra cuando la pulsas y se abre sola cuando suena la alarma.
 
 ## Uso
 

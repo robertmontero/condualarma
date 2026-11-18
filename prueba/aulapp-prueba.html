@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aulapp (PRUEBA) — Academia Ficticia</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 "Segoe UI",Arial,sans-serif;background:#eef1f6;color:#2b3445}
+  .top{background:#1f4e8c;color:#fff;padding:12px 24px;display:flex;align-items:center;gap:12px}
+  .top b{font-size:18px}.top .tag{background:#f5a524;color:#1a1300;font-weight:700;font-size:11px;padding:2px 8px;border-radius:4px}
+  .top .sp{flex:1}.top button{background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:4px;padding:5px 12px;cursor:pointer}
+  .wrap{max-width:980px;margin:24px auto;padding:0 16px}
+  .panel{background:#fff;border:1px solid #d9dee8;border-radius:6px;margin-bottom:18px}
+  .panel h3{margin:0;padding:12px 16px;border-bottom:1px solid #e5e9f0;font-size:15px;color:#1f4e8c}
+  .content{padding:14px 16px}
+  .row{display:flex;flex-wrap:wrap}
+  .col-md-6{width:50%;padding:0 8px}.col-md-5{width:42%;padding:0 8px}
+  .row .row{padding:5px 0;border-bottom:1px dashed #edf0f5}
+  .text-left label{font-weight:600;color:#4a5568}.text-right{text-align:right}
+  .estado{margin:0 16px 16px;padding:14px 16px;border-radius:6px;font-size:16px;font-weight:600;background:#e8f1ff;color:#1f4e8c}
+  .estado.reg{background:#fdecec;color:#b42318}.estado.fin{background:#eef0f3;color:#475467}
+  .login{max-width:380px;margin:60px auto;background:#fff;border:1px solid #d9dee8;border-radius:8px;padding:28px}
+  .login h2{margin:0 0 4px;color:#1f4e8c}.login p{color:#667085;margin:0 0 18px}
+  .login input{width:100%;padding:10px;border:1px solid #c9d1de;border-radius:4px;margin:4px 0 12px;font:inherit}
+  .login button{width:100%;padding:11px;background:#1f4e8c;color:#fff;border:0;border-radius:4px;font:600 15px inherit;cursor:pointer}
+  .err{color:#b42318;font-size:13px;min-height:18px}
+  @media (max-width:700px){.col-md-6,.col-md-5{width:100%}}
+
+  /* ---- Simulador (no es parte de Aulapp) ---- */
+  #sim{position:fixed;left:16px;bottom:16px;z-index:999999;width:290px;background:#111827;color:#f3f4f6;border-radius:12px;
+       box-shadow:0 12px 40px rgba(0,0,0,.35);font-size:13px;overflow:hidden}
+  #sim .h{background:#f5a524;color:#1a1300;font-weight:700;padding:8px 12px;display:flex;justify-content:space-between;cursor:pointer}
+  #sim .b{padding:10px 12px}
+  #sim button{display:block;width:100%;text-align:left;margin:0 0 6px;padding:8px 10px;border-radius:7px;border:1px solid #374151;
+              background:#1f2937;color:#f3f4f6;font:13px "Segoe UI",Arial;cursor:pointer}
+  #sim button:hover{background:#374151}
+  #sim .m{font-size:12px;color:#9ca3af;margin-top:6px;line-height:1.4}
+  #sim .m b{color:#fbbf24}
+  #sim.min .b{display:none}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<!-- Simulador de pruebas: cambia el estado de esta página ficticia -->
+<div id="sim">
+  <div class="h" onclick="this.parentNode.classList.toggle('min')"><span>🧪 Simulador de pruebas</span><span>▾</span></div>
+  <div class="b">
+    <button onclick="horarioDeNuevo()">1 · Clase nueva (empieza en unos minutos)</button>
+    <button onclick="validacionPronto()">2 · Validación empieza en 1 minuto</button>
+    <button onclick="poner({estado:'registro'})">3 · Simular registro de entrada</button>
+    <button onclick="poner({estado:'fin'})">4 · Simular fin de clase</button>
+    <button onclick="cerrarSesion()">5 · Cerrar sesión (probar ingreso)</button>
+    <button onclick="localStorage.removeItem('aulappPrueba');location.reload()">↺ Reiniciar todo</button>
+    <div class="m" id="simInfo"></div>
+  </div>
+</div>
+
+<script>
+var CLAVE = 'aulappPrueba';
+function leer(){ try { return JSON.parse(localStorage.getItem(CLAVE)) || {}; } catch(e){ return {}; } }
+function guardar(s){ try { localStorage.setItem(CLAVE, JSON.stringify(s)); } catch(e){} }
+function hhmm(d){ return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0'); }
+function hoy(){ var d=new Date(); return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear(); }
+
+// Horario como en Aulapp real: validación de (inicio + 55 min) a (inicio + 75 min), clase de 2 horas.
+function horarioDesdeInicio(ini){
+  var m = 60000;
+  return { inicio: hhmm(ini), fin: hhmm(new Date(+ini + 120*m)),
+           min: hhmm(new Date(+ini + 55*m)), max: hhmm(new Date(+ini + 75*m)) };
+}
+function horarioNormal(){
+  // La clase empieza en el próximo múltiplo de 5 minutos.
+  var d = new Date(); d.setSeconds(0, 0); d.setMinutes(Math.ceil((d.getMinutes() + 1) / 5) * 5);
+  return horarioDesdeInicio(d);
+}
+
+var s = leer();
+if (s.logueado === undefined) s.logueado = true;
+if (!s.estado) s.estado = 'curso';
+if (!s.inicio || s.dia !== hoy()) { var h = horarioNormal(); for (var k in h) s[k] = h[k]; s.dia = hoy(); guardar(s); }
+
+// Cuenta cuántas veces se ha cargado la página en esta pestaña (para ver si CondUAlarma recarga)
+var cargas = (+sessionStorage.getItem('aulappCargas') || 0) + 1;
+sessionStorage.setItem('aulappCargas', cargas);
+var desde = sessionStorage.getItem('aulappDesde') || hhmm(new Date());
+sessionStorage.setItem('aulappDesde', desde);
+
+function poner(cambios){ for (var k in cambios) s[k] = cambios[k]; guardar(s); pintar(); }
+function validacionPronto(){
+  // La validación (inicio + 55) queda en el próximo minuto: el inicio se corre 55 minutos atrás.
+  var min = new Date(); min.setSeconds(0, 0); min.setMinutes(min.getMinutes() + 1);
+  var h = horarioDesdeInicio(new Date(+min - 55*60000));
+  h.estado = 'curso';
+  poner(h);
+}
+function horarioDeNuevo(){ var h = horarioNormal(); h.estado = 'curso'; poner(h); }
+// Como en Aulapp real: cerrar sesión e ingresar llevan a otra carga de página
+function cerrarSesion(){ s.logueado = false; guardar(s); location.reload(); }
+function ingresar(e){
+  e.preventDefault();
+  var u = document.getElementById('usuario').value.trim(), p = document.getElementById('clave').value;
+  if (!u || !p) { document.getElementById('err').textContent = 'Escribe usuario y contraseña.'; return; }
+  s.logueado = true; guardar(s);
+  setTimeout(function(){ location.reload(); }, 300);
+}
+
+function fila(cols, etiqueta, valor){
+  return '<div class="row"><div class="'+cols+' text-left"><label>'+etiqueta+'</label></div> <div class="'+cols+' text-right">'+valor+'</div></div>';
+}
+
+function pintar(){
+  var app = document.getElementById('app');
+  if (!s.logueado) {
+    app.innerHTML =
+      '<div class="top"><b>Aulapp</b><span class="tag">PRUEBA</span></div>' +
+      '<form class="login" onsubmit="ingresar(event)"><h2>Iniciar sesión</h2><p>Academia de Conducción Ficticia</p>' +
+      '<label>Usuario</label><input id="usuario" type="text" autocomplete="username">' +
+      '<label>Contraseña</label><input id="clave" type="password" autocomplete="current-password">' +
+      '<div class="err" id="err"></div><button type="submit">Ingresar</button></form>';
+  } else {
+    var txt = { curso:'Estado: Clase en curso',
+                registro:'Cierre de registro de entrada',
+                fin:'Finalización de clase' }[s.estado];
+    var cls = { curso:'', registro:'reg', fin:'fin' }[s.estado];
+    app.innerHTML =
+      '<div class="top"><b>Aulapp</b><span class="tag">PRUEBA</span><span class="sp"></span><span>Alumno de prueba</span>' +
+      '<button onclick="cerrarSesion()">Salir</button></div>' +
+      '<div class="wrap"><div class="panel"><h3>Detalle de la clase</h3>' +
+      '<div class="content"><div class="row"><div class="col-md-6">' +
+        fila('col-md-6','Fecha:', hoy()) +
+        fila('col-md-6','Tipo de clase:', 'Teoría') +
+        fila('col-md-6','Nombre de la clase:', 'NORMAS DE TRANSITO 4 (PRUEBA)') +
+        fila('col-md-6','Instructor:', 'INSTRUCTOR FICTICIO') +
+        fila('col-md-6','Nomenclatura Aula:', 'Aula 1') +
+      '</div><div class="col-md-6">' +
+        fila('col-md-5','Hora de inicio:', s.inicio) +
+        fila('col-md-5','Hora fin:', s.fin) +
+        fila('col-md-5','Hora mínima validación:', s.min) +
+        fila('col-md-5','Hora máxima validación:', s.max) +
+      '</div></div></div>' +
+      '<div class="estado '+cls+'">'+txt+'</div></div></div>';
+  }
+  document.getElementById('simInfo').innerHTML =
+    'Cargas de la página: <b>'+cargas+'</b> desde las '+desde+'<br>' +
+    'Clase: <b>'+s.inicio+' → '+s.fin+'</b><br>' +
+    'Validación: <b>'+s.min+' → '+s.max+'</b>';
+}
+pintar();
+</script>
+</body>
+</html>
